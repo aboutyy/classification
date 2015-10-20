@@ -1,0 +1,19 @@
+### Example user template template
+### Example user template
+
+# IntelliJ project files
+.idea
+*.iml
+*.las
+*.xyz
+*.arff
+*.csv
+*.xyz_label_conf
+*.dat
+*.txt
+*.log
+*.md
+*.xmind
+out
+gen
+# Created by .ignore support plugin (hsz.mobi)
