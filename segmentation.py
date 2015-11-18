@@ -3,55 +3,38 @@
 import laspy
 import timeit
 import os
+import math
 import csv
 import numpy as np
 import scipy
-from scipy import linalg as la
+import geometry
+import progressbar
 import scipy.spatial
 
 # ####### 定义常量###### #
 # 体素大小
 VOXEL_SIZE = 0.15
 
-# 最小杆高度
-MIN_HEIGHT = 0.9
-
-# 杆离地面最大距离
-DISTANCE_TO_GROUND = 1.0
-
-# 杆在地面的最大面积
-MAX_AREA = 2
-
-# 邻居最远体素距离
-MAX_NEIGHBOR_DISTANCE = 0.3
-
 # 判断地面的法向量
 GROUND_NORMAL_THRESHOLD = 0.7
-
-# 作圆柱判断的最小圆柱高度
-MIN_CYLINDER_HEIGHT = 1.0
-
-# 内圆柱半径
-INNER_RADIUS = 0.3
-
-MAX_INNER_RADIUS = 0.7
-# 双圆柱内外圆柱之间的距离
-DISTANCE_OF_IN2OUT = 0.3
-
-# 双圆柱用来定义杆的内外点比例
-RATIO_OF_POINTS_COUNT = 0.98
 
 # 是否进行地面距离判定
 USE_GROUND = True
 
-# 地面点判断时的邻居点最远距离
-GROUND_NEIGHBOR = 0.5
+# 地面局部偏低的计算范围
+GROUND_LOCAL_DISTANDE = 2.0
 
-# 合并相邻垂直voxel组的距离阈值
-MERGING_DISTANCE = 0.3
+# 地面最大角度
+MAX_SLOPE = 15
 
-# 过滤长宽
-FILTERING_LENGTH = 1.0
+
+def preprocess():
+    """
+    点云体素的预处理
+
+    通过预处理去除一些特别稀疏的体素，为后面的计算去除一些问题，比如：计算法向量时计算矩阵是需要至少三个点
+    """
+    pass
 
 
 def add_dimension(infile_path, outfile_path, names, types, descriptions):
@@ -186,13 +169,16 @@ def voxelization(infile_path, outfile_path, voxel_size):
             count += 1
 
 
-def vertical_continiuity_analysis(dataset, point_count_array):
+def ground_detection(dataset, point_count_array):
     """
-    向上连续性分析，分析出具有连续性的位置点
+    地面点的提取
 
-    通过从最低位置点开始，向上面方向的邻居做增长，选取包含最多点的体素作为增长的方向，依次类推，直到没有了向上的体素为止。
+    通过从最低位置点开始，向上增长，如果没有向上点或者向上点不够，则作为潜在地面点，再通过其他的限制条件比如法向量，维度等条件再筛选
     """
-    # 存储所有位置的最低点作为增长的种子点
+    #
+    widgets = ['ground_detection: ', progressbar.Percentage(), ' ', progressbar.Bar(),
+               ' ', progressbar.Timer(), ' ']
+    pbar = progressbar.ProgressBar(widgets=widgets, maxval=100).start()
     seeds_list = []
     seeds_list.append(0)
     voxel_length = len(dataset)
@@ -222,12 +208,113 @@ def vertical_continiuity_analysis(dataset, point_count_array):
         else:
             seeds_list.append(count)
             count += 1
-    return seeds_list
+    pbar.update(19)
+    tree = scipy.spatial.cKDTree(dataset)
+    updated_seeds = []
+    count = 0
+    for seed in seeds_list:
+        normal = geometry.get_normals(dataset, tree, dataset[:, 0][seed], dataset[:, 1][seed], dataset[:, 2][seed], 4)
+        # 离散点不认为是地面点
+        if normal < -1:
+            continue
+        if abs(normal) > GROUND_NORMAL_THRESHOLD:
+            updated_seeds.append(seed)
+        count += 1
+        pbar.update(19 + 50 * float(count) / len(seeds_list))
+    new_dataset = np.vstack([dataset[:, 0], dataset[:, 1]]).transpose()  # 投影三维数据到二维平面，构建二维的数据集
+    new_tree = scipy.spatial.cKDTree(new_dataset)
+    final_seeds = []
+    # 判断是否局部处于底部区域，默认最大坡度15°。2米范围内的高差是2 * sin(15°) = 0.52。 如果该点与周围点中最低点距离大于这个值不被认为是地面点
+    count = 0
+    for new_seed in updated_seeds:
+        neighbors = new_tree.query_ball_point(new_dataset[new_seed], GROUND_LOCAL_DISTANDE / VOXEL_SIZE)
+        minz = min(dataset[:, 2][neighbors])
+        if dataset[:, 2][new_seed] - minz < 2 * math.sin(3.14 * (MAX_SLOPE / 180.0)) / VOXEL_SIZE:
+            final_seeds.append(new_seed)
+        count += 1
+        pbar.update(70 + float(count) * 30 / len(updated_seeds))
+    pbar.finish()
+    return final_seeds
+
+
+def object_position_detection(dataset, point_count_array):
+    """
+
+    向上连续性分析，分析出具有连续性的位置点
+
+    通过从最低位置点开始，向上面方向的邻居做增长，选取包含最多点的体素作为增长的方向，依次类推，直到没有了向上的体素为止。
+    """
+
+    # 存储所有位置的最低点作为增长的种子点
+    seeds_list = []
+    voxel_length = len(dataset)
+    count = 1
+    previous_x = dataset[:, 0][0]
+    previous_y = dataset[:, 1][0]
+    flag = 0
+    # 计算出所有种子
+    while count < voxel_length:
+        if dataset[:, 0][count] == previous_x and dataset[:, 1][count] == previous_y:
+            if dataset[:, 2][count] - dataset[:,2][count-1] < 3 and flag == count - 1:
+                # 过滤边缘点
+                #if points_count_array[count] > 1:
+                seeds_list.append(count)
+        else:
+            flag = count
+            previous_x = dataset[:, 0][count]
+            previous_y = dataset[:, 1][count]
+        count += 1
+    tree = scipy.spatial.cKDTree(dataset)
+    # 存储3维位置点信息
+    location_list_list = []
+    # 存储水平位置点集合
+    horizontal_location_list = []
+    count = 0
+    for seed in seeds_list:
+        count += 1
+        location_list = []
+        vertical_count = 0
+        current_seed = seed
+        location_list.append(current_seed)
+        # 选择26邻居体素
+        while True:
+            neighbors = tree.query_ball_point(dataset[current_seed], float(MAX_NEIGHBOR_DISTANCE) / VOXEL_SIZE)
+            neighbors = np.array(neighbors)
+            if len(neighbors) <= 1:
+                break
+            else:
+                # 找出上邻居点
+                up_indexs = np.where(dataset[:, 2][neighbors] - dataset[:, 2][current_seed] == 1)[0]
+                # 找出正上点
+                up_index = np.where((dataset[:, 2][neighbors] - dataset[:, 2][current_seed] == 1) &
+                                    (dataset[:, 0][neighbors] == dataset[:, 0][current_seed]) &
+                                    (dataset[:, 1][neighbors] == dataset[:, 1][current_seed]))[0]
+                up_neighbor_lenght = len(up_indexs)
+                if up_neighbor_lenght > 0:
+                    vertical_count += 1
+                    if up_neighbor_lenght == 1:
+                        current_seed = neighbors[up_indexs][0]
+                    elif len(up_index) != 0:
+                        current_seed = neighbors[up_index[0]]
+                    else:
+                        temp_index = np.where(point_count_array[neighbors[up_indexs]] ==
+                                              max(point_count_array[neighbors[up_indexs]]))[0][0]
+                        current_seed = neighbors[up_indexs[temp_index]]
+                    # 加入所有邻居点到潜在杆位置点中
+                    for index in neighbors[up_indexs]:
+                        location_list.append(index)
+                else:
+                    break
+        # 若向上增长能达到一定高度，则被认为是一个潜在的位置点
+        height = max(dataset[:, 2][location_list]) - min(dataset[:, 2][location_list])
+        if height * VOXEL_SIZE >= MIN_HEIGHT:
+            location_list_list.append(location_list)
+            horizontal_location_list.append(seed)
+    return horizontal_location_list, location_list_list
 
 
 if __name__ == '__main__':
     import yylog
-
     loop = True
     while loop:
         inputpath = raw_input('\n Input las file name: \n')
@@ -269,10 +356,10 @@ if __name__ == '__main__':
     log = yylog.LOG('pole')
     # try:
     start = timeit.default_timer()
-    print '\n2. vertical_continiuity_analysis...'
-    ground_voxels = vertical_continiuity_analysis(original_dataset, points_count_array)
+    print '\n2. Ground detecting...'
+    ground_voxels = ground_detection(original_dataset, points_count_array)
 
-    print '\n6. lableling...'
+    print '\n3. lableling...'
     ground_voxels_array = np.array([0] * len(voxel_code_array))
     count = 1
     for ground_voxel in ground_voxels:
