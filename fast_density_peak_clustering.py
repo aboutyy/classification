@@ -3,68 +3,22 @@ __author__ = 'Administrator'
 import laspy
 import numpy as np
 import scipy.spatial
-import csv
+import math
 import os
+import progressbar
 
-
-def add_dimension(infile_path, outfile_path, names, types, descriptions):
-    """
-    add new dimensions to the las file
-
-    Args:
-        names: names array of the dimensions
-        types: types array of the dimensions
-                0       Raw Extra Bytes Value of “options”
-                1       unsigned char   1 byte
-                2       Char    1 byte
-                3       unsigned short  2 bytes
-                4       Short   2 bytes
-                5       unsigned long   4 bytes
-                6       Long    4 bytes
-                7       unsigned long long      8 bytes
-                8       long long       8 bytes
-                9       Float   4 bytes
-                10      Double  8 bytes
-                11      unsigned char[2]        2 byte
-                12      char[2] 2 byte
-                13      unsigned short[2]       4 bytes
-                14      short[2]        4 bytes
-                15      unsigned long[2]        8 bytes
-                16      long[2] 8 bytes
-                17      unsigned long long[2]   16 bytes
-                18      long long[2]    16 bytes
-                19      float[2]        8 bytes
-                20      double[2]       16 bytes
-                21      unsigned char[3]        3 byte
-                22      char[3] 3 byte
-                23      unsigned short[3]       6 bytes
-                24      short[3]        6 bytes
-                25      unsigned long[3]        12 bytes
-                26      long[3] 12 bytes
-                27      unsigned long long[3]   24 bytes
-                28      long long[3]    24 bytes
-                29      float[3]        12 bytes
-                30      double[3]       24 bytes
-        description: discription of the dimension
-    Returns:
-        None
-    """
-    infile = laspy.file.File(infile_path, mode="r")
-    outfile = laspy.file.File(outfile_path, mode="w", header=infile.header)
-    exist_names = []
-    for dimension in infile.point_format:
-        exist_names.append(dimension.name)
-    for name, datatype, description in zip(names, types, descriptions):
-        if exist_names.count(name) != 0:
-            print "dimension %s already exist!!", name
-            continue
-        outfile.define_new_dimension(name, datatype, description)
-    for dimension in infile.point_format:
-        data = infile.reader.get_dimension(dimension.name)
-        outfile.writer.set_dimension(dimension.name, data)
-        exist_names.append(dimension.name)
-    infile.close()
-    outfile.close()
+OBJ_DISTANCE = 2
+# TODO 测试较小的体素大小
+VOXEL_SIZE = 0.5
+# 地面点最大高度
+GROUND_HEIGHT = 0.5
+# 地面最大角度
+MAX_SLOPE = 15
+# 地面局部偏低的计算范围
+GROUND_LOCAL_DISTANDE = 5.0
+DELTA_THRESHOLD = 4
+RHO_THRESHOLD = 1.2
+NEIGHBOUR_DISTANCE = 10
 
 
 def voxelization(infile_path, outfile_path, voxel_size):
@@ -112,7 +66,7 @@ def voxelization(infile_path, outfile_path, voxel_size):
             intensity_in_one_voxel_count += infile.intensity[indices[point_count]]
             point_count += 1
             points_in_one_voxel_count += 1
-        intensity_in_one_voxel_array.append(intensity_in_one_voxel_count / points_in_one_voxel_count)
+        intensity_in_one_voxel_array.append(intensity_in_one_voxel_count / float(points_in_one_voxel_count))
         points_in_one_voxel_array.append(points_in_one_voxel_count)
         # save the code to an array which later will be stored in the csv file
         voxel_count += 1
@@ -125,12 +79,68 @@ def voxelization(infile_path, outfile_path, voxel_size):
             txtfile.write(line)
 
 
-def getdistance(pt1, pt2):
+def ground_detection(dataset, point_count_array):
+    """
+    地面点的提取
+
+    通过从最低位置点开始，向上增长，如果没有向上点或者向上点不够，则作为潜在地面点，再通过其他的限制条件比如法向量，维度等条件再筛选
+    """
+    widgets = ['ground_detection: ', progressbar.Percentage(), ' ', progressbar.Bar(marker='>'), ' ', progressbar.Timer(), ' ']
+    pbar = progressbar.ProgressBar(widgets=widgets, maxval=100).start()
+    seeds_list = []
+    voxel_length = len(dataset)
+    count = 0
+    # 计算出所有种子
+    while count < voxel_length - 1:  # 每次循环到下一个水平位置点
+        pbar.update(19 * float(count) / voxel_length)
+        temp_seeds = [count]  # 存储的是一个水平位置点的所有体素
+        count += 1
+        if count < voxel_length:
+            # 与前一个体素x,y 不相同，找的是最低高度的体素
+            while dataset[:, 0][count] == dataset[:, 0][count - 1] and dataset[:, 1][count] == dataset[:, 1][count - 1]:
+                if dataset[:, 2][temp_seeds[count]] - dataset[:, 2][temp_seeds[count - 1]] < 2:
+                    temp_seeds.append(count)
+                    count += 1
+                    if count >= voxel_length:
+                        break
+            if len(temp_seeds) <= GROUND_HEIGHT / VOXEL_SIZE:
+                for seed in temp_seeds:
+                    seeds_list.append(seed)
+    pbar.update(19)
+    tree = scipy.spatial.cKDTree(dataset)
+    updated_seeds = []
+
+    new_dataset = np.vstack([dataset[:, 0], dataset[:, 1]]).transpose()  # 投影三维数据到二维平面，构建二维的数据集
+    new_tree = scipy.spatial.cKDTree(new_dataset)
+    final_ground_seeds = []
+    # ##判断是否局部处于底部区域1.默认最大坡度15°。2米范围内的高差是2 * sin(15°) = 0.52。如果该点与周围点中最低点距离大于这个值不被认为是地面点
+    # ##2. 如果该点与平均值相差太远也不属于地面点
+    count = 0
+    for new_seed in updated_seeds:
+        neighbors = new_tree.query_ball_point(new_dataset[new_seed], GROUND_LOCAL_DISTANDE / VOXEL_SIZE)
+        minz = min(dataset[:, 2][neighbors])
+        if dataset[:, 2][new_seed] - minz < 5 * math.sin(3.14 * (MAX_SLOPE / 180.0)) / VOXEL_SIZE:
+            final_ground_seeds.append(new_seed)
+        count += 1
+        pbar.update(70 + count * 30 / len(updated_seeds))
+    # ##判断位置点与地面点的距离，以排除一些非位置点
+    pbar.finish()
+    return final_ground_seeds
+
+
+def get_distance(pt1, pt2):
     tmp = pow(pt1[0] - pt2[0], 2) + pow(pt1[1] - pt2[1], 2) + pow(pt1[2] - pt2[2], 2)
     return pow(tmp, 0.5)
 
 
-def set_rho_delta(dataset, point_count_list):
+def get_compund_distance(pt1, pt2, i1, i2):
+    tmp = pow(pt1[0] - pt2[0], 2) + pow(pt1[1] - pt2[1], 2) + pow(pt1[2] - pt2[2], 2)
+    u_distance = pow(tmp, 0.5)
+    i_distance = math.fabs(i1 - i2)
+    return u_distance + i_distance
+
+
+def set_rho_delta(dataset, point_count_list, intensity_list):
     """
     密度计算函数
 
@@ -146,6 +156,7 @@ def set_rho_delta(dataset, point_count_list):
     # 记录一定范围内每个体素密度高于当前体素的最近体素编号
     nearest_neighbor_list = [-1] * voxel_length
     count = 0
+    intensity_range = float(max(intensity_list) - min(intensity_list))
     # 计算出所有种子
     while count < voxel_length:  # 每次循环到下一个水平位置点
         temp_seeds = [count]  # 存储的是一个水平位置点的所有体素
@@ -166,6 +177,7 @@ def set_rho_delta(dataset, point_count_list):
         temp_count = 0
         for seed in temp_seeds:
             # 密度函数
+            # todo 修改rho计算函数，不再和z直接相关
             rho_list[seed] = ((h_count - float(temp_count) / h_count) + point_count / 10000.0) / (dataset[:, 2][seed] + 1)
             delta = 0
             if temp_count == 0:
@@ -183,13 +195,15 @@ def set_rho_delta(dataset, point_count_list):
     for ii in range(voxel_length):
         if delta_list[ii] != -1:
             continue
-        neighbors = tree.query_ball_point(dataset[ii], 10)
+        neighbors = tree.query_ball_point(dataset[ii], NEIGHBOUR_DISTANCE)
         distance_list = []
         neighbor_list = []
         for neighbor in neighbors:
             # 计算比当前点密度大到该点的距离
             if rho_list[neighbor] > rho_list[ii]:
-                distance = getdistance(dataset[ii], dataset[neighbor])
+                distance = get_distance(dataset[ii], dataset[neighbor])
+                # TODO 把intensity加入距离计算之中
+                compund_distance = distance + 2 *  math.fabs((intensity_list[ii] - intensity_list[neighbor])) / intensity_range
                 distance_list.append(distance)
                 neighbor_list.append(neighbor)
         if len(distance_list) == 0:
@@ -205,7 +219,7 @@ def set_rho_delta(dataset, point_count_list):
     class_num = 1
     for ii in range(len(rho_sorted)):
         id_p = rho_sorted[ii][1]
-        if delta_list[id_p] > 4 and rho_list[id_p] > 2:
+        if delta_list[id_p] > DELTA_THRESHOLD and rho_list[id_p] > RHO_THRESHOLD:
             class_list[id_p] = class_num
             class_num += 1
         else:
@@ -229,21 +243,12 @@ def draw_decision_graph(pl, rho, delta, cl, color_num):
     pl.ylabel(r'$\delta$')
 
 
-def draw_decision_graph(pl, rho, delta, cl, color_num):
-    cm = pl.get_cmap("RdYlGn")
-    for i in range(len(rho)):
-        pl.plot(rho[i], delta[i], 'o', color=cm(cl[i] * 1.0 / color_num))
-    pl.xlabel(r'$\rho$')
-    pl.ylabel(r'$\delta$')
-
-
 if __name__ == '__main__':
-    infilepath = 'data/2.las'
-    outtxt = infilepath[:-4] + '.txt'
-    outtxt1 = infilepath[:-4] + '1' + '.txt'
+    infilepath = 'data/sg111.las'
+    outtxt = infilepath[:-4] + '_' + str(VOXEL_SIZE) + '.txt'
     if not os.path.exists(outtxt):
         print "\n1. voxelizing..."
-        voxelization(infilepath, outtxt, 0.5)
+        voxelization(infilepath, outtxt, VOXEL_SIZE)
     points_count_array, intensity_array = [], []
     original_x_int_array, original_y_int_array, original_z_int_array = [], [], []
     with open(outtxt, 'r') as txt_file:
@@ -261,11 +266,10 @@ if __name__ == '__main__':
 
     original_dataset = np.vstack([original_x_int_array, original_y_int_array, original_z_int_array]).transpose()
     print "\n2. clustering..."
-    neighbors, rhos, deltas, classes = set_rho_delta(original_dataset, points_count_array)
-    with open(outtxt, 'r') as fin, open(outtxt1, 'w') as fout:
-        lines = fin.readlines()
-        for line, neighbor, rhoitem, deltaitem, classitem in zip(lines, neighbors, rhos, deltas, classes):
-            line = line.strip()
+    neighbors, rhos, deltas, classes = set_rho_delta(original_dataset, points_count_array, intensity_array)
+    with open(outtxt, 'w') as fout:
+        for x, y, z, p, i, neighbor, rhoitem, deltaitem, classitem in zip(original_x_int_array, original_y_int_array, original_z_int_array, points_count_array, intensity_array, neighbors, rhos, deltas, classes):
+            line = str(x) + ' ' + str(y) + ' ' + str(z) + ' ' + str(p) + ' ' + str(i)
             line = line + ' ' + str(neighbor) + ' ' + str(rhoitem) + ' ' + str(deltaitem) + ' ' + str(classitem) + '\n'
             fout.write(line)
     lasfile = laspy.file.File(infilepath, mode="rw")
