@@ -10,10 +10,11 @@ import scipy
 import geometry
 import progressbar
 import scipy.spatial
-
+from sklearn.cluster import DBSCAN
+from sklearn import linear_model, datasets
 # ####### 定义常量###### #
 # 体素大小
-VOXEL_SIZE = 0.15
+VOXEL_SIZE = 0.2
 
 # 判断地面的法向量
 GROUND_NORMAL_THRESHOLD = 0.7
@@ -22,10 +23,19 @@ GROUND_NORMAL_THRESHOLD = 0.7
 USE_GROUND = True
 
 # 地面局部偏低的计算范围
-GROUND_LOCAL_DISTANDE = 2.0
+GROUND_LOCAL_DISTANDE = 5.0
 
 # 地面最大角度
 MAX_SLOPE = 15
+
+# 地面点最大高度
+GROUND_HEIGHT = 0.6
+
+# 最小位置高度，大于等于这个高度则认为是一个地物点
+POSITION_HEIGHT = 0.8
+
+# 位置点离地面最大距离
+DISTANCE_TO_GROUND = 1.0
 
 
 def preprocess():
@@ -35,6 +45,49 @@ def preprocess():
     通过预处理去除一些特别稀疏的体素，为后面的计算去除一些问题，比如：计算法向量时计算矩阵是需要至少三个点
     """
     pass
+
+
+def region_growing(voxelset, radius, angle_threshold):
+    # codes below were region growing algorithm implemented based pseudocode in
+    # http://pointclouds.org/documentation/tutorials/region_growing_segmentation.php#region-growing-segmentation
+    # Point cloud: voxelset
+    # Point Normals: normal_list
+    # Angle threshold: angle_threshold
+    # Awailable point list: a_list
+
+    tree = scipy.spatial.cKDTree(voxelset)
+    length = len(voxelset)
+    a_list = range(length)
+    seed_length = len(a_list)
+    # Point normals
+    normal_list = []
+    for voxel in voxelset:
+        normal_list.append(math.fabs(geometry.get_normal(voxelset, tree, voxel[0], voxel[1], voxel[2], 2)))
+    # region list
+    regions = []
+    while len(a_list) > 0:
+        current_region = []
+        current_seeds = []
+        # voxel with lowest z value
+        lowest_voxel_indice = a_list[0]
+        current_seeds.append(lowest_voxel_indice)
+        current_region.append(lowest_voxel_indice)
+        del a_list[0]
+        count = 0
+        while count < len(current_seeds):
+            current_seed = current_seeds[count]
+            count += 1
+            current_seed_neighbors = tree.query_ball_point([voxelset[:, 0][current_seed], voxelset[:, 1][current_seed],
+                                                            voxelset[:, 2][current_seed]], radius)
+            for neighbor in current_seed_neighbors:
+                if a_list.count(neighbor) != 0:
+                    if current_region.count(neighbor) == 0 and math.acos(math.fabs(normal_list[neighbor] - normal_list[current_seed])) < angle_threshold:
+                        current_region.append(neighbor)
+                        a_list.remove(neighbor)
+                        if current_seeds.count(neighbor) == 0:
+                            current_seeds.append(neighbor)
+        regions.append(np.array(current_region))
+    return regions
 
 
 def add_dimension(infile_path, outfile_path, names, types, descriptions):
@@ -112,7 +165,6 @@ def voxelization(infile_path, outfile_path, voxel_size):
     """
 
     infile = laspy.file.File(infile_path, mode="rw")
-
     # 计算每个点的voxel码
     scaled_x = np.vectorize(int)((1 / voxel_size) * (infile.x - infile.header.min[0]))
     scaled_y = np.vectorize(int)((1 / voxel_size) * (infile.y - infile.header.min[1]))
@@ -121,42 +173,35 @@ def voxelization(infile_path, outfile_path, voxel_size):
     voxel_count = 0
     point_count = 0
     point_lengh = len(infile.x)
-
     # the array to store the code of the voxel, this is actually the row, columm and height number of the voxel
     code_array = []
-
     # the array to store the point number in each voxel
     points_in_one_voxel_array = []
-
     # the array to store the average intensity of points in a voxel
     intensity_in_one_voxel_array = []
-
-    while point_count < point_lengh - 1:
-
+    while point_count < point_lengh:
         # the counter of points number in one voxel
         points_in_one_voxel_count = 1
-        intensity_in_one_voxel_count = 0
+        intensity_in_one_voxel_count = infile.intensity[indices[point_count]]
+        infile.voxel_index[indices[point_count]] = voxel_count
+        code = "{:0>4d}".format(scaled_x[indices[point_count]]) + \
+       "{:0>4d}".format(scaled_y[indices[point_count]]) + \
+       "{:0>4d}".format(scaled_z[indices[point_count]])
+        code_array.append(code)
+        point_count += 1
         # loop of finding points with same code
-        while point_count < point_lengh - 1 and \
-                        scaled_x[indices[point_count + 1]] == scaled_x[indices[point_count]] and \
-                        scaled_y[indices[point_count + 1]] == scaled_y[indices[point_count]] and \
-                        scaled_z[indices[point_count + 1]] == scaled_z[indices[point_count]]:
+        while point_count < point_lengh and \
+                        scaled_x[indices[point_count]] == scaled_x[indices[point_count - 1]] and \
+                        scaled_y[indices[point_count]] == scaled_y[indices[point_count - 1]] and \
+                        scaled_z[indices[point_count]] == scaled_z[indices[point_count - 1]]:
             # add a voxel index label to the point
             infile.voxel_index[indices[point_count]] = voxel_count
             intensity_in_one_voxel_count += infile.intensity[indices[point_count]]
             point_count += 1
             points_in_one_voxel_count += 1
-
-        infile.voxel_index[indices[point_count]] = voxel_count
-        intensity_in_one_voxel_count += infile.intensity[indices[point_count]]
         intensity_in_one_voxel_array.append(intensity_in_one_voxel_count / points_in_one_voxel_count)
         points_in_one_voxel_array.append(points_in_one_voxel_count)
         # save the code to an array which later will be stored in the csv file
-        code = "{:0>4d}".format(scaled_x[indices[point_count]]) + \
-               "{:0>4d}".format(scaled_y[indices[point_count]]) + \
-               "{:0>4d}".format(scaled_z[indices[point_count]])
-        code_array.append(code)
-        point_count += 1
         voxel_count += 1
 
     # save the code to the csv file sequentially
@@ -169,148 +214,110 @@ def voxelization(infile_path, outfile_path, voxel_size):
             count += 1
 
 
-def ground_detection(dataset, point_count_array):
+def ground_and_position_detection(dataset, point_count_array):
     """
     地面点的提取
 
     通过从最低位置点开始，向上增长，如果没有向上点或者向上点不够，则作为潜在地面点，再通过其他的限制条件比如法向量，维度等条件再筛选
     """
-    #
-    widgets = ['ground_detection: ', progressbar.Percentage(), ' ', progressbar.Bar(),
-               ' ', progressbar.Timer(), ' ']
+    widgets = ['ground_detection: ', progressbar.Percentage(), ' ', progressbar.Bar(marker='>'), ' ', progressbar.Timer(), ' ']
     pbar = progressbar.ProgressBar(widgets=widgets, maxval=100).start()
     seeds_list = []
-    seeds_list.append(0)
     voxel_length = len(dataset)
-    count = 1
-    flag = 0
+    count = 0
+    # 记录每个水平位置点对应的垂直位置
+    position_list_list = []
     # 计算出所有种子
-    while count < voxel_length:
-        # 与前一个体素x,y 不相同，找的是最低的体素
-        temp_seeds = []
+    while count < voxel_length - 1:  # 每次循环到下一个水平位置点
+        pbar.update(19 * float(count) / voxel_length)
+        temp_seeds = [count]  # 存储的是一个水平位置点的所有体素
+        count += 1
+        # 与前一个体素x,y 不相同，找的是最低高度的体素
         while dataset[:, 0][count] == dataset[:, 0][count - 1] and dataset[:, 1][count] == dataset[:, 1][count - 1]:
             temp_seeds.append(count)
             count += 1
             if count >= voxel_length:
                 break
-        if len(temp_seeds) != 0:
+        if len(temp_seeds) > 1:
             # 找出向上连续增长少于一定数目的点当作地面点
-            temp_temp_seeds = []
-            for temp_seed in temp_seeds:
-                if dataset[:, 2][temp_seed] - dataset[:, 2][temp_seed - 1] < 3:
-                    temp_temp_seeds.append(temp_seed)
+            temp_temp_seeds = [temp_seeds[0]]  # 存储的是在垂直方向上连续增长的体素
+            for index in range(0, len(temp_seeds) - 1):
+                # 判断连续性的条件是垂直方向上间隔不超过1个体素
+                if dataset[:, 2][temp_seeds[index + 1]] - dataset[:, 2][temp_seeds[index]] < 4:
+                    temp_temp_seeds.append(temp_seeds[index + 1])
                 else:
                     break
-                if len(temp_temp_seeds) >= 3:
-                    break
-            if len(temp_temp_seeds) < 3:
+            # 垂直方向上小于一定高度则认为是地面点
+            if len(temp_temp_seeds) <= GROUND_HEIGHT / VOXEL_SIZE:
                 seeds_list += temp_temp_seeds
+            # 垂直方向大于一定高度则认为是地物点
+            elif len(temp_temp_seeds) >= POSITION_HEIGHT / VOXEL_SIZE:
+                position_list_list.append(temp_temp_seeds)
         else:
-            seeds_list.append(count)
-            count += 1
+            seeds_list.append(count - 1)
+    if dataset[:, 0][voxel_length - 1] != dataset[:, 0][voxel_length - 2] or dataset[:, 1][voxel_length - 1] != dataset[:, 1][voxel_length - 2]:
+        seeds_list.append(voxel_length - 1)
     pbar.update(19)
     tree = scipy.spatial.cKDTree(dataset)
     updated_seeds = []
     count = 0
     for seed in seeds_list:
-        normal = geometry.get_normals(dataset, tree, dataset[:, 0][seed], dataset[:, 1][seed], dataset[:, 2][seed], 4)
+        normal = geometry.get_normal(dataset, tree, dataset[:, 0][seed], dataset[:, 1][seed], dataset[:, 2][seed], 4)
         # 离散点不认为是地面点
         if normal < -1:
             continue
         if abs(normal) > GROUND_NORMAL_THRESHOLD:
             updated_seeds.append(seed)
         count += 1
-        pbar.update(19 + 50 * float(count) / len(seeds_list))
+        pbar.update(19 + 50 * count / len(seeds_list))
     new_dataset = np.vstack([dataset[:, 0], dataset[:, 1]]).transpose()  # 投影三维数据到二维平面，构建二维的数据集
     new_tree = scipy.spatial.cKDTree(new_dataset)
-    final_seeds = []
-    # 判断是否局部处于底部区域，默认最大坡度15°。2米范围内的高差是2 * sin(15°) = 0.52。 如果该点与周围点中最低点距离大于这个值不被认为是地面点
+    final_ground_seeds = []
+    # ##判断是否局部处于底部区域1.默认最大坡度15°。2米范围内的高差是2 * sin(15°) = 0.52。如果该点与周围点中最低点距离大于这个值不被认为是地面点
+    # ##2. 如果该点与平均值相差太远也不属于地面点
     count = 0
     for new_seed in updated_seeds:
         neighbors = new_tree.query_ball_point(new_dataset[new_seed], GROUND_LOCAL_DISTANDE / VOXEL_SIZE)
         minz = min(dataset[:, 2][neighbors])
-        if dataset[:, 2][new_seed] - minz < 2 * math.sin(3.14 * (MAX_SLOPE / 180.0)) / VOXEL_SIZE:
-            final_seeds.append(new_seed)
+        if dataset[:, 2][new_seed] - minz < 5 * math.sin(3.14 * (MAX_SLOPE / 180.0)) / VOXEL_SIZE:
+            final_ground_seeds.append(new_seed)
         count += 1
-        pbar.update(70 + float(count) * 30 / len(updated_seeds))
+        pbar.update(70 + count * 30 / len(updated_seeds))
+    # ##判断位置点与地面点的距离，以排除一些非位置点
+    filtered_position_list_list = []
+    back_dataset = dataset[final_ground_seeds]
+    back_tree = scipy.spatial.cKDTree(back_dataset)
+    # for position in position_list_list:
+    #     distance, neighbor = back_tree.query(dataset[position[0]])  # 位置点里面的第一个点是最低点，计算最点与地面的距离
+    #     z_neighbor = dataset[:, 2][final_ground_seeds[neighbor]]
+    #     if dataset[:, 2][position[0]] - z_neighbor < DISTANCE_TO_GROUND / VOXEL_SIZE:
+    #         filtered_position_list_list.append(position)
     pbar.finish()
-    return final_seeds
+    indices = []
+    h_indices = []
+    for position in position_list_list:
+        indices += position
+        h_indices.append(position[0])
+    # Compute DBSCAN
+    X = dataset[indices]
+    h_X = dataset[:, 0:2][h_indices]
+    db = DBSCAN(eps=3, min_samples=2).fit(X)
+    h_db = DBSCAN(eps=3, min_samples=3).fit(h_X)
+    location_array = np.array([0] * len(point_count_array))
+    h_location_array = np.array([0] * len(point_count_array))
+    location_array[indices] = db.labels_ + 1
+    h_location_array[h_indices] = h_db.labels_ + 1
+    return final_ground_seeds, location_array, h_location_array
 
 
-def object_position_detection(dataset, point_count_array):
+def feature_extraction(dataset, point_count_array):
     """
 
-    向上连续性分析，分析出具有连续性的位置点
+    对位置点块提取特征，为下一步分类做好准备
 
-    通过从最低位置点开始，向上面方向的邻居做增长，选取包含最多点的体素作为增长的方向，依次类推，直到没有了向上的体素为止。
     """
 
-    # 存储所有位置的最低点作为增长的种子点
-    seeds_list = []
-    voxel_length = len(dataset)
-    count = 1
-    previous_x = dataset[:, 0][0]
-    previous_y = dataset[:, 1][0]
-    flag = 0
-    # 计算出所有种子
-    while count < voxel_length:
-        if dataset[:, 0][count] == previous_x and dataset[:, 1][count] == previous_y:
-            if dataset[:, 2][count] - dataset[:,2][count-1] < 3 and flag == count - 1:
-                # 过滤边缘点
-                #if points_count_array[count] > 1:
-                seeds_list.append(count)
-        else:
-            flag = count
-            previous_x = dataset[:, 0][count]
-            previous_y = dataset[:, 1][count]
-        count += 1
-    tree = scipy.spatial.cKDTree(dataset)
-    # 存储3维位置点信息
-    location_list_list = []
-    # 存储水平位置点集合
-    horizontal_location_list = []
-    count = 0
-    for seed in seeds_list:
-        count += 1
-        location_list = []
-        vertical_count = 0
-        current_seed = seed
-        location_list.append(current_seed)
-        # 选择26邻居体素
-        while True:
-            neighbors = tree.query_ball_point(dataset[current_seed], float(MAX_NEIGHBOR_DISTANCE) / VOXEL_SIZE)
-            neighbors = np.array(neighbors)
-            if len(neighbors) <= 1:
-                break
-            else:
-                # 找出上邻居点
-                up_indexs = np.where(dataset[:, 2][neighbors] - dataset[:, 2][current_seed] == 1)[0]
-                # 找出正上点
-                up_index = np.where((dataset[:, 2][neighbors] - dataset[:, 2][current_seed] == 1) &
-                                    (dataset[:, 0][neighbors] == dataset[:, 0][current_seed]) &
-                                    (dataset[:, 1][neighbors] == dataset[:, 1][current_seed]))[0]
-                up_neighbor_lenght = len(up_indexs)
-                if up_neighbor_lenght > 0:
-                    vertical_count += 1
-                    if up_neighbor_lenght == 1:
-                        current_seed = neighbors[up_indexs][0]
-                    elif len(up_index) != 0:
-                        current_seed = neighbors[up_index[0]]
-                    else:
-                        temp_index = np.where(point_count_array[neighbors[up_indexs]] ==
-                                              max(point_count_array[neighbors[up_indexs]]))[0][0]
-                        current_seed = neighbors[up_indexs[temp_index]]
-                    # 加入所有邻居点到潜在杆位置点中
-                    for index in neighbors[up_indexs]:
-                        location_list.append(index)
-                else:
-                    break
-        # 若向上增长能达到一定高度，则被认为是一个潜在的位置点
-        height = max(dataset[:, 2][location_list]) - min(dataset[:, 2][location_list])
-        if height * VOXEL_SIZE >= MIN_HEIGHT:
-            location_list_list.append(location_list)
-            horizontal_location_list.append(seed)
-    return horizontal_location_list, location_list_list
+    return
 
 
 if __name__ == '__main__':
@@ -351,33 +358,60 @@ if __name__ == '__main__':
     original_y_int_array = np.vectorize(int)(map(lambda x: x[4:8], voxel_code_array))
     original_z_int_array = np.vectorize(int)(map(lambda x: x[8:12], voxel_code_array))
     original_dataset = np.vstack([original_x_int_array, original_y_int_array, original_z_int_array]).transpose()
+    voxel_length = len(voxel_code_array)
 
     # ############# 2.垂直连续性分析 ################
     log = yylog.LOG('pole')
     # try:
     start = timeit.default_timer()
-    print '\n2. Ground detecting...'
-    ground_voxels = ground_detection(original_dataset, points_count_array)
+    print '\n2. Ground and Positions detecting...'
+    ground_voxels, position_list_array, horizontal_list_array = ground_and_position_detection(original_dataset, points_count_array)
+    horizontal_list_list = []
+    horizontal_number_list = []
+    for position in horizontal_list_array:
+        if position in horizontal_number_list:
+            index = horizontal_number_list.index(position)
+            horizontal_list_array[index].append(position)
+        else:
+            temp_list = [position]
+            horizontal_list_list.append(temp_list)
+    for horizontal_list in horizontal_list_list:
+        if len(horizontal_list) < 5:
+            continue
+        X = original_x_int_array[horizontal_list]
+        y = original_y_int_array[horizontal_list]
+        # Robustly fit linear model with RANSAC algorithm
+        model_ransac = linear_model.RANSACRegressor(linear_model.LinearRegression())
+        model_ransac.fit(X, y)
+        inlier_mask = model_ransac.inlier_mask_
+        outlier_mask = np.logical_not(inlier_mask)
 
-    print '\n3. lableling...'
+    print '\n3. Lableling...'
     ground_voxels_array = np.array([0] * len(voxel_code_array))
     count = 1
     for ground_voxel in ground_voxels:
         ground_voxels_array[ground_voxel] = 1
-
     lasfile = laspy.file.File(outlas, mode="rw")
+    point_length = len(lasfile.x)
     point_count = 0
     lasfile.user_data[:] = 0
     lasfile.gps_time[:] = 0
+    lasfile.olocation[:] = 0
     if USE_GROUND:
         lasfile.raw_classification[:] = 0
     lasfile.pt_src_id[:] = 0
+    widgets = ['ground_detection: ', progressbar.Percentage(), ' ', progressbar.Bar(),
+               ' ', progressbar.Timer(), ' ']
+    pbar = progressbar.ProgressBar(widgets=widgets, maxval=10000).start()
     for voxel_index in lasfile.voxel_index:
         # lasfile.gps_time[point_count] = horizontal_location_array[voxel_index]
         lasfile.raw_classification[point_count] = ground_voxels_array[voxel_index]
+        lasfile.olocation[point_count] = position_list_array[voxel_index]
+        lasfile.gps_time[point_count] = horizontal_list_array[voxel_index]
         point_count += 1
+        pbar.update((point_count - 1) * 10000 / point_length)
     lasfile.close()
-
+    pbar.finish()
     # except:
     #     log.error()  # 使用系统自己的错误描述
     #     os.system('pause')

@@ -1,7 +1,5 @@
 # -*-coding:utf-8-*- 
 __author__ = 'Administrator' 
-# -*- coding: UTF-8 -*-
-__author__ = 'Administrator'
 
 import csv
 import __future__

@@ -114,7 +114,7 @@ def get_descent_eignvalues(dataset, tree, x, y, z, radius):
     return evals
 
 
-def get_normals(dataset, tree, x, y, z, radius):
+def get_normal(dataset, tree, x, y, z, radius):
     from scipy import linalg as la
 
     indices = tree.query_ball_point([x, y, z], radius)

@@ -36,9 +36,37 @@ def get_descent_eignvalues(dataset, tree, x, y, z, radius):
     return evals
 
 
-def get_normals(dataset, tree, x, y, z, radius):
-    from scipy import linalg as la
+def get_normal(dataset, tree, x, y, z, radius):
+    """
+    计算Nz的值
 
+    计算[x,y,z]点的x,y平面的垂直方向法向量值
+
+    """
+
+    from scipy import linalg as la
+    indices = tree.query_ball_point([x, y, z], radius)
+    if len(indices) <= 3:
+        return
+    idx = tuple(indices)
+    data = np.vstack([dataset[idx, 0], dataset[idx, 1], dataset[idx, 2]])
+    cov = np.cov(data)
+    evals, evects = la.eigh(cov)
+    evals = np.abs(evals)
+    index = evals.argsort()[::-1]
+    evects = evects[:, index]
+    return evects[2][2]
+
+
+def get_normals(dataset, tree, x, y, z, radius):
+    """
+    计算Nz的值
+
+    计算[x,y,z]点的x,y平面的垂直方向法向量值
+
+    """
+
+    from scipy import linalg as la
     indices = tree.query_ball_point([x, y, z], radius)
     if len(indices) <= 3:
         return
@@ -371,6 +399,23 @@ def write_normal(in_file, out_file, fixed_radius):
             writer.writerow([original_code_array[count], point_counts_array[count], intensity_array[count],
                              olocation_array[count], mlocation_array[count], normal_list[count]])
             count += 1
+
+
+def clean_isolated_points(in_file, out_file, radius, num_neighbors):
+    file1 = laspy.file.File(in_file, mode='r')
+    file2 = laspy.file.File(out_file, header=file1.header, mode='w')
+    dataset = np.vstack([file1.x, file1.y, file1.z]).transpose()
+    tree = scipy.spatial.cKDTree(dataset)
+    count = 0
+    point_list = []
+    for x, y, z in zip(file1.x, file1.y, file1.z):
+        neighbors = tree.query_ball_point([x,y,z], radius)
+        if len(neighbors) > num_neighbors:
+            point_list.append(count)
+        count += 1
+    file2.points = file1.points[point_list]
+    file1.close()
+    file2.close()
 
 
 """
