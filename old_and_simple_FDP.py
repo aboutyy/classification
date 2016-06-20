@@ -215,6 +215,14 @@ def set_rho_delta(dataset, point_count_list, intensity_list, labels_list):
     此处的密度计算公式是 rho(p) = h - n / h + c/100, 其中h为当前点的z方向点累计体素数，n为当前点z方向的计数，c为这一位置点数
     比如(3,2,5)这个点，(3,2)位置有10个体素，80个点，则rho(p) = 10 - 5/10 + 0.8 = 10.3
     """
+    data_length = len(dataset)
+    rows = max(dataset[:, 0]) + 2
+    cols = max(dataset[:, 1]) + 2
+    height = max(dataset[:, 2]) + 2
+    whole_label_set = np.zeros(shape=(rows, cols, height), dtype=int)
+    for count in range(data_length):
+        x, y, z = dataset[:, 0][count], dataset[:, 1][count], dataset[:, 2][count]
+        whole_label_set[x, y, z] = 1  # 有数据的格子标记为1
     new_dataset = np.vstack([dataset[:, 0], dataset[:, 1]]).transpose()
     hor_tree = scipy.spatial.cKDTree(new_dataset)
     voxel_length = len(dataset)
