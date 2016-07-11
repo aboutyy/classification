@@ -21,8 +21,8 @@ GROUND_LOCAL_DISTANDE = 5.0
 DELTA_THRESHOLD = 2 / VOXEL_SIZE
 RHO_THRESHOLD = 1.5 / VOXEL_SIZE
 
-# 这个即是规定的最大物体半径,单位是米
-NEIGHBOUR_DISTANCE = 5 / VOXEL_SIZE
+# 这个即是规定的最大物体半径
+NEIGHBOUR_DISTANCE = int(5 / VOXEL_SIZE)
 
 
 def voxelization(infile_path, outfile_path, voxel_size):
@@ -225,42 +225,50 @@ def set_rho_delta(dataset, point_count_list, intensity_list, labels_list):
         whole_label_set[x, y, z] = 1  # 有数据的格子标记为1
     new_dataset = np.vstack([dataset[:, 0], dataset[:, 1]]).transpose()
     hor_tree = scipy.spatial.cKDTree(new_dataset)
-    voxel_length = len(dataset)
     # 记录每个体素的密度
-    rho_list = [-1] * voxel_length
+    rho_list = [-1] * data_length
     # 记录每个体素到更高密度体素的最小距离
-    delta_list = [-1] * voxel_length
+    delta_list = [-1] * data_length
     # 记录一定范围内每个体素密度高于当前体素的最近体素编号
-    nearest_neighbor_list = [-1] * voxel_length
+    nearest_neighbor_list = [-1] * data_length
     count = 0
     intensity_range = float(max(intensity_list) - min(intensity_list))
     # 计算出所有种子
     seed_list = []
-    while count < voxel_length:  # 每次循环到下一个连续水平位置点
+    while count < data_length:  # 每次循环到下一个连续水平位置点
         temp_seeds = [count]  # 存储的是一个水平位置点的所有体素
         # 垂直方向点计数
         count += 1
         # 垂直高度计数
         h_count = 1
         # 计算某一水平位置的连续体素集合
-        if count < voxel_length:
+        if count < data_length:
             while dataset[:, 0][count] == dataset[:, 0][count - 1] and dataset[:, 1][count] == dataset[:, 1][count - 1]\
                     and dataset[:, 2][count] - dataset[:, 2][count - 1] <= 0.5 / VOXEL_SIZE:
                 h_count += 1
                 temp_seeds.append(count)
                 count += 1
-                if count >= voxel_length:
+                if count >= data_length:
                     break
         seed_list.append(temp_seeds)
+    temp_list = range(-NEIGHBOUR_DISTANCE, NEIGHBOUR_DISTANCE + 1)
     for i in trange(len(seed_list), desc='computing rho'):
         temp_seeds = seed_list[i]
         temp_count = 0
-        neighbors = hor_tree.query_ball_point([new_dataset[temp_seeds[0]]], NEIGHBOUR_DISTANCE)
-        if len(neighbors) > 5:
-            bottom_height = np.sort(dataset[:, 2][neighbors])[2]
-            distance = dataset[:, 2][temp_seeds[0]] - bottom_height
+        if dataset[:, 2][temp_seeds[0]] == 0:
+            distance = 0
         else:
-            distance = dataset[:, 2][temp_seeds[0]] - min(dataset[:, 2][neighbors[0]])
+            distance_list = []
+            for i in temp_list:
+                for j in temp_list:
+                    for k in range(- dataset[:, 2][temp_seeds[0]], 0):
+                        if whole_label_set[i, j, k] == 1:
+                            distance_list.append(-k)
+                            break
+            if len(distance_list) == 0:
+                distance = 0
+            else:
+                distance = max(distance_list)
         h_count = len(temp_seeds)
         point_count = sum(np.array(points_count_array)[temp_seeds])
         for seed in temp_seeds:
@@ -284,7 +292,7 @@ def set_rho_delta(dataset, point_count_list, intensity_list, labels_list):
             nearest_neighbor_list[seed] = seed - 1
             delta_list[seed] = delta
             temp_count += 1
-    for ii in trange(voxel_length, desc='computing delta'):
+    for ii in trange(data_length, desc='computing delta'):
         if delta_list[ii] != -1:
             continue
         neighbors = hor_tree.query_ball_point(new_dataset[ii], NEIGHBOUR_DISTANCE)
@@ -308,7 +316,7 @@ def set_rho_delta(dataset, point_count_list, intensity_list, labels_list):
             if delta_list[ii] < NEIGHBOUR_DISTANCE:
                 nearest_neighbor_list[ii] = neighbor_array[distance_array.index(delta_list[ii])]
 
-    class_list = [-1] * voxel_length
+    class_list = [-1] * data_length
     rho_list1 = [(rho_list[i], i) for i in range(len(rho_list))]
     rho_sorted = sorted(rho_list1, reverse=1)
     class_num = 1

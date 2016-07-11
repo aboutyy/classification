@@ -16,6 +16,8 @@ from sklearn import linear_model, datasets
 # 体素大小
 VOXEL_SIZE = 0.2
 
+#todo 对w.las数据地面点的计算有问题
+
 # 判断地面的法向量
 GROUND_NORMAL_THRESHOLD = 0.7
 
@@ -29,10 +31,10 @@ GROUND_LOCAL_DISTANDE = 5.0
 MAX_SLOPE = 15
 
 # 地面点最大高度
-GROUND_HEIGHT = 0.6
+GROUND_HEIGHT = 1.4
 
 # 最小位置高度，大于等于这个高度则认为是一个地物点
-POSITION_HEIGHT = 0.8
+POSITION_HEIGHT = 1.4
 
 # 位置点离地面最大距离
 DISTANCE_TO_GROUND = 1.0

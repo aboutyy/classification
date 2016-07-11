@@ -58,6 +58,28 @@ def get_normal(dataset, tree, x, y, z, radius):
     return evects[2][2]
 
 
+def get_normal(dataset, tree, point, radius):
+    """
+    计算Nz的值
+
+    计算[x,y,z]点的x,y平面的垂直方向法向量值
+
+    """
+
+    from scipy import linalg as la
+    indices = tree.query_ball_point(point, radius)
+    if len(indices) <= 3:
+        return
+    idx = tuple(indices)
+    data = np.vstack([dataset[idx, 0], dataset[idx, 1], dataset[idx, 2]])
+    cov = np.cov(data)
+    evals, evects = la.eigh(cov)
+    evals = np.abs(evals)
+    index = evals.argsort()[::-1]
+    evects = evects[:, index]
+    return evects[2][2]
+
+
 def get_normals(dataset, tree, x, y, z, radius):
     """
     计算Nz的值
